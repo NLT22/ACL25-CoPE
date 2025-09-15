@@ -88,15 +88,17 @@ Coming soon.
 
 # Cite
 ```
-
-@inproceedings{tang2025modeling,
-	author = {Tang, Haomiao and Wang, Jinpeng and Peng, Yuang and Meng, Guanghao and Luo, Ruisheng and Chen, Bin and Chen, Long and Wang, Yaowei and Xia, Shutao},
-	booktitle = {Annual {Meeting} of the {Association} for {Computational} {Linguistics}},
-	year = {2025},
-	pages = {1210--1222},
-	organization = {},
-	title = {Modeling {Uncertainty} in {Composed} {Image} {Retrieval} via {Probabilistic} {Embeddings}},
-	volume = {},
+@inproceedings{tang-etal-2025-modeling,
+  title     = {Modeling Uncertainty in Composed Image Retrieval via Probabilistic Embeddings},
+  author    = {Tang, Haomiao and Wang, Jinpeng and Peng, Yuang and Meng, GuangHao and Luo, Ruisheng and Chen, Bin and Chen, Long and Wang, Yaowei and Xia, Shu-Tao},
+  booktitle = {Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)},
+  month     = jul,
+  year      = {2025},
+  address   = {Vienna, Austria},
+  publisher = {Association for Computational Linguistics},
+  url       = {https://aclanthology.org/2025.acl-long.61/},
+  doi       = {10.18653/v1/2025.acl-long.61},
+  pages     = {1210--1222},
+  isbn      = {979-8-89176-251-0}
 }
-
 ```
