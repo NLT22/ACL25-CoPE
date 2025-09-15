@@ -1,0 +1,11 @@
+name: cope
+dependencies:
+  - python=3.8
+  - pip
+  - pip:
+      - torch
+      - torchvision
+      - transformers
+      - numpy
+      - tensorboard
+      - omegaconf

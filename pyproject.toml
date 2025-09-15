@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acl25_cope"
+version = "0.1.0"
+description = "ACL25 CoPE: Composed Image Retrieval Models"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {file = "LICENSE"}
+authors = [
+    {name = "ACL25 CoPE Team"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "torch>=1.9.0",
+    "torchvision>=0.10.0",
+    "transformers>=4.20.0",
+    "numpy>=1.21.0",
+    "pillow>=8.3.0",
+    "pyyaml>=5.4.0",
+    "tqdm>=4.62.0",
+    "tensorboard>=2.7.0",
+    "scikit-learn>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.0",
+    "black>=21.0",
+    "flake8>=3.9",
+    "isort>=5.9",
+]
+
+[project.scripts]
+cope-train = "acl25_cope.train:main"
+cope-list-models = "acl25_cope.list_models:main"
+
+[project.urls]
+Homepage = "https://github.com/ACL25-CoPE"
+Repository = "https://github.com/ACL25-CoPE"
+
+[tool.setuptools.packages.find]
+exclude = ["temp", "temp.*", "reference", "reference.*"]
+
+[tool.setuptools.package-data]
+"*" = ["config-*.yaml"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 88

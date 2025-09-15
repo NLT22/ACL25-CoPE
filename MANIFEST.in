@@ -1,0 +1,11 @@
+include README.md
+include LICENSE
+include *.yaml
+include config-*.yaml
+recursive-include acl25_cope *.yaml
+recursive-include acl25_cope *.yml
+recursive-exclude temp *
+recursive-exclude reference *
+recursive-exclude __pycache__ *
+recursive-exclude *.pyc *
+global-exclude .DS_Store
