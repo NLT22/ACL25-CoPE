@@ -1,0 +1,98 @@
+# COPE Probabilistic Training Configuration
+# Configuration for training ProbCLIPModel with uncertainty-based evaluation
+
+# Training parameters
+training:
+  batch_size: 4
+  epochs: 1
+  warmup_epochs: 1
+  shuffle: true
+  num_workers: 10
+  pin_memory: true
+  drop_last: true
+
+# Validation parameters
+validation:
+  query_batch_size: 4
+  target_batch_size: 4
+  shuffle: false
+  num_workers: 10
+  pin_memory: true
+  metrics: 
+    - 10
+    - 50
+  # Probabilistic-specific validation options
+  analyze_uncertainty: true  # Enable uncertainty analysis during evaluation
+
+# Data parameters (same as base config)
+data:
+  data_path:  /e/datasets/syncpr-fashioniq
+  dataset: fashioniq # fashioniq | cirr
+  category: dress # only required for fashioniq: dress | shirt | toptee 
+  augmentation:
+    enabled: true
+    methods:
+      - cutout
+      - modify_hsv
+      - rotate
+      - scale
+      - noise
+
+# Output and checkpoint settings
+output:
+  # Checkpoint saving parameters
+  checkpoint:
+    save_dir:  /e/datasets/syncpr-fashioniq/checkpoints  # Directory to save checkpoints
+    save_frequency: 1  # Save checkpoint every N epochs
+    save_best_only: false  # Only save checkpoints when validation metric improves
+    best_metric: "r_10"  # Metric to track for best model (r_10, r_50, etc.)
+    best_metric_mode: "max"  # "max" for metrics where higher is better, "min" for lower is better
+    save_last: true  # Always save the last checkpoint
+    max_checkpoints: 5  # Maximum number of checkpoints to keep (oldest will be deleted)
+
+# Hardware
+device: cuda:0
+
+# Model parameters
+model:
+  name: prob_clip  # Use the probabilistic CLIP model
+  path: openai/clip-vit-large-patch14
+  local_files_only: false  # Whether to load model from local files only
+  
+  # Neighborhood loss parameters
+  neighborhood_loss:
+    weight: 0.01  # Weight for the NeighborhoodDeviationLoss
+    k_neighbors: 5  # Number of neighbors to consider for neighborhood loss
+  
+  # Loss weight configuration for combined training
+  loss_weights:
+    alpha: 0.9  # Weight parameter for loss combination
+    beta: 0.1  # Weight parameter for loss combination
+  
+  # CoPE loss parameters (backbone.loss)
+  cope_loss:
+    init_shift: 5  # Initial value for the learnable shift parameter
+    init_negative_scale: 5  # Initial value for the learnable negative scale parameter
+  
+  # Image preprocessing parameters
+  preprocessing:
+    target_ratio: 1.25  # Target aspect ratio for TargetPad
+    image_size: 224  # Final image dimension
+  
+  # Uncertainty pooler parameters (for both text and vision)
+  uncertainty:
+    sigma_ln_init: 0.01  # Initial value for uncertainty pooler log(sigma)
+    sigma_ln_init_bias: 0  # Initial bias for uncertainty pooler
+
+# Optimizer parameters
+optimizer:
+  lr: 2.0e-6
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-7
+  # Special learning rate for CoPE loss parameters (shift, negative_scale)
+  cope_lr: 2.0e-7
+
+# EMA parameters
+ema:
+  rate: 0.99
