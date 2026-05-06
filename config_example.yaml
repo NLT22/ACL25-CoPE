@@ -59,6 +59,13 @@ output:
 # Hardware
 device: cuda:0
 
+# Distributed training. Use torchrun to enable it; plain python train.py stays single-GPU.
+distributed_config:
+  dist_url: env://
+  dist_on_itp: false
+  # Keep true when warmup_epochs > 0 because warmup skips the probabilistic loss modules.
+  find_unused_parameters: true
+
 # Model parameters
 model:
   name: prob_clip  # Use the probabilistic CLIP model

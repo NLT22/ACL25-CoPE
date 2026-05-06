@@ -1,12 +1,30 @@
 import os
+import torch
 from torch.utils.data import Dataset
 import orjson
 from PIL import Image
 import random
 from torch.utils.data import default_collate
+from torch.utils.data.distributed import DistributedSampler
 import numpy as np
 from typing import List
+from . import misc
 from .transforms import squarepad_transform, targetpad_transform, DataAugmentation
+
+
+class DistributedEvalSampler(torch.utils.data.Sampler):
+    def __init__(self, dataset, num_replicas=None, rank=None):
+        self.dataset = dataset
+        self.num_replicas = misc.get_world_size() if num_replicas is None else num_replicas
+        self.rank = misc.get_rank() if rank is None else rank
+        self.indices = list(range(self.rank, len(self.dataset), self.num_replicas))
+
+    def __iter__(self):
+        return iter(self.indices)
+
+    def __len__(self):
+        return len(self.indices)
+
 
 def get_optional_config_value(config_section, name, default=None):
     if config_section is not None and hasattr(config_section, name):
@@ -423,12 +441,30 @@ def build_data(config, preprocess):
         
     else:
         raise ValueError(f"Unsupported dataset: {config.data.dataset}")
+
+    if misc.is_dist_avail_and_initialized():
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=misc.get_world_size(),
+            rank=misc.get_rank(),
+            shuffle=config.training.shuffle,
+            drop_last=config.training.drop_last,
+        )
+        val_sampler = DistributedEvalSampler(val_dataset)
+        train_shuffle = False
+        val_shuffle = False
+    else:
+        train_sampler = None
+        val_sampler = None
+        train_shuffle = config.training.shuffle
+        val_shuffle = config.validation.shuffle
     
     # Build dataloaders
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=config.training.batch_size,
-        shuffle=config.training.shuffle,
+        shuffle=train_shuffle,
+        sampler=train_sampler,
         num_workers=config.training.num_workers,
         pin_memory=config.training.pin_memory,
         collate_fn=train_collate_fn,
@@ -438,7 +474,8 @@ def build_data(config, preprocess):
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=config.validation.query_batch_size,
-        shuffle=config.validation.shuffle,
+        shuffle=val_shuffle,
+        sampler=val_sampler,
         num_workers=config.validation.num_workers,
         pin_memory=config.validation.pin_memory,
         collate_fn=val_collate_fn,
@@ -460,4 +497,6 @@ def build_data(config, preprocess):
         'train_dataset': train_dataset,
         'val_dataset': val_dataset,
         'target_dataset': target_dataset,
+        'train_sampler': train_sampler,
+        'val_sampler': val_sampler,
     }

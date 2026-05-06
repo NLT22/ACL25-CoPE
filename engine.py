@@ -1,7 +1,12 @@
 import torch
 import torch.nn.functional as F
 from util.misc import MetricLogger, SmoothedValue
+from util import misc
 import copy
+
+
+def unwrap_model(model):
+    return model.module if hasattr(model, 'module') else model
 
 
 def update_ema(target_params, source_params, rate=0.99):
@@ -63,7 +68,8 @@ def train_one_epoch(model, model_params, ema_params, data_loader, optimizer, dev
     
     # Check if we're in warmup phase
     warmup_epochs = getattr(config.training, 'warmup_epochs', 0)
-    use_warmup = epoch < warmup_epochs and hasattr(model, 'warmup')
+    raw_model = unwrap_model(model)
+    use_warmup = epoch < warmup_epochs and hasattr(raw_model, 'warmup')
     header = 'Epoch: [{}]'.format(epoch)
 
     for batch in metric_logger.log_every(data_loader, 50, header):
@@ -72,13 +78,10 @@ def train_one_epoch(model, model_params, ema_params, data_loader, optimizer, dev
 
         ref_imgs = ref_imgs.to(device)
         tgt_imgs = tgt_imgs.to(device)
-        input_ids = model.tokenize(texts, padding='max_length', return_tensors='pt').input_ids.to(device)
+        input_ids = raw_model.tokenize(texts, padding='max_length', return_tensors='pt').input_ids.to(device)
 
         with torch.amp.autocast('cuda'):
-            if use_warmup:
-                loss = model.warmup(ref_imgs, input_ids, tgt_imgs)
-            else:
-                loss = model(ref_imgs, input_ids, tgt_imgs)
+            loss = model(ref_imgs, input_ids, tgt_imgs, use_warmup=use_warmup)
 
         # Check for NaN loss and raise exception with step information
         if torch.isnan(loss):
@@ -128,6 +131,7 @@ def train_one_epoch(model, model_params, ema_params, data_loader, optimizer, dev
             if logger:
                 logger.info(f"Epoch: {epoch}, Loss: {loss.item()}")
 
+    metric_logger.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
@@ -139,6 +143,7 @@ def evaluate_probabilistic(model, ema_params, val_loader, tgt_loader, device, co
         use_probabilistic: If True, uses probabilistic distance. If False, uses cosine similarity of feat['mean'].
     """
     model.eval()
+    raw_model = unwrap_model(model)
     metrics = config.validation.metrics
 
     recall_metrics = {}
@@ -147,12 +152,12 @@ def evaluate_probabilistic(model, ema_params, val_loader, tgt_loader, device, co
 
     # Apply EMA if requested
     if use_ema:
-        model_state_dict = copy.deepcopy(model.state_dict())
-        ema_state_dict = copy.deepcopy(model.state_dict())
-        for i, (name, _value) in enumerate(model.named_parameters()):
+        model_state_dict = copy.deepcopy(raw_model.state_dict())
+        ema_state_dict = copy.deepcopy(raw_model.state_dict())
+        for i, (name, _value) in enumerate(raw_model.named_parameters()):
             assert name in ema_state_dict
             ema_state_dict[name] = ema_params[i]
-        model.load_state_dict(ema_state_dict)
+        raw_model.load_state_dict(ema_state_dict)
 
     with torch.no_grad():
         with torch.amp.autocast('cuda'):
@@ -164,7 +169,7 @@ def evaluate_probabilistic(model, ema_params, val_loader, tgt_loader, device, co
             logger.info("Collecting target features...")
             for batch in tgt_loader:
                 all_tgt_names += batch['img_name']
-                tgt_feat = model.encode_target(batch['img'].to(device))
+                tgt_feat = raw_model.encode_target(batch['img'].to(device))
                 all_tgt_features.append(tgt_feat)
             
             # Separate means and vars for efficient batch processing
@@ -183,10 +188,10 @@ def evaluate_probabilistic(model, ema_params, val_loader, tgt_loader, device, co
                 ref_imgs, texts, tgt_img_names = batch['ref_img'], batch['text_instruction'], batch['tgt_img_name']
 
                 ref_imgs = ref_imgs.to(device)
-                input_ids = model.tokenize(texts, padding='max_length', return_tensors='pt').input_ids.to(device)
+                input_ids = raw_model.tokenize(texts, padding='max_length', return_tensors='pt').input_ids.to(device)
 
                 # Get query features (returns dict with 'mean' and 'var')
-                query_features = model.encode_query(ref_imgs, input_ids)
+                query_features = raw_model.encode_query(ref_imgs, input_ids)
                 
                 # Find target indices 
                 valid_positions = []
@@ -238,7 +243,19 @@ def evaluate_probabilistic(model, ema_params, val_loader, tgt_loader, device, co
 
     # Restore original model state
     if use_ema:
-        model.load_state_dict(model_state_dict)
+        raw_model.load_state_dict(model_state_dict)
+
+    if misc.is_dist_avail_and_initialized():
+        reduced = torch.tensor(
+            [count, missing_targets] + [recall_metrics[metric] for metric in metrics],
+            dtype=torch.float64,
+            device=device,
+        )
+        torch.distributed.all_reduce(reduced, op=torch.distributed.ReduceOp.SUM)
+        count = int(reduced[0].item())
+        missing_targets = int(reduced[1].item())
+        for index, metric in enumerate(metrics, start=2):
+            recall_metrics[metric] = reduced[index].item()
 
     if missing_targets and logger:
         logger.warning(

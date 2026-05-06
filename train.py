@@ -7,8 +7,10 @@ import json
 import shutil
 from pathlib import Path
 from torch.optim import AdamW
+from torch.nn.parallel import DistributedDataParallel
 from omegaconf import OmegaConf
 from util.data import build_data
+from util import misc
 from engine import train_one_epoch, evaluate_probabilistic
 from models import model_registry
 
@@ -75,6 +77,9 @@ def save_checkpoint_hf(model, epoch, eval_stats, config, logger, checkpoint_dir,
         is_best: Whether this is the best model so far
         is_last: Whether this is the last epoch
     """
+    if not misc.is_main_process():
+        return None
+
     # Create checkpoint directory if it doesn't exist
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -128,6 +133,9 @@ def cleanup_old_checkpoints(checkpoint_dir, max_checkpoints, logger):
         max_checkpoints: Maximum number of checkpoints to keep
         logger: Logger instance
     """
+    if not misc.is_main_process():
+        return
+
     checkpoint_dir = Path(checkpoint_dir)
     if not checkpoint_dir.exists():
         return
@@ -222,14 +230,24 @@ def should_save_checkpoint(epoch, config, eval_stats, best_metric_value, logger)
 
 
 def main(config):
-    # misc.init_distributed_mode(config)
+    if hasattr(config, 'distributed_config'):
+        for key in ('dist_url', 'dist_on_itp'):
+            if hasattr(config.distributed_config, key):
+                setattr(config, key, getattr(config.distributed_config, key))
+
+    misc.init_distributed_mode(config)
     device = torch.device(config.device)
+    if getattr(config, 'distributed', False):
+        device = torch.device(f"cuda:{config.gpu}")
+        config.device = str(device)
+
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.setLevel(logging.INFO if misc.is_main_process() else logging.WARNING)
     
     # Create console handler
     ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
+    ch.setLevel(logging.INFO if misc.is_main_process() else logging.WARNING)
     
     # Create formatter
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -262,35 +280,35 @@ def main(config):
         'local_files_only': getattr(config.model, 'local_files_only', True)
     })
     
-    model = model_registry.get_model(config.model.name, config.model.path, **model_kwargs).to(device)
+    model_without_ddp = model_registry.get_model(config.model.name, config.model.path, **model_kwargs).to(device)
     
     # Verify this is a probabilistic model
-    if not hasattr(model.backbone, 'loss'):
+    if not hasattr(model_without_ddp.backbone, 'loss'):
         logger.warning(f"Model {config.model.name} does not have backbone.loss attribute. "
                       "This script is designed for probabilistic models like ProbCLIPModel.")
     
     # Apply CoPE loss configuration from config if specified
-    if hasattr(model.backbone, 'loss') and hasattr(config.model, 'cope_loss'):
+    if hasattr(model_without_ddp.backbone, 'loss') and hasattr(config.model, 'cope_loss'):
         cope_config = config.model.cope_loss
         logger.info("Applying CoPE loss configuration from config...")
         
         # Apply configuration parameters to the correct loss object
         if hasattr(cope_config, 'init_shift'):
-            model.backbone.loss.shift.data.fill_(cope_config.init_shift)
+            model_without_ddp.backbone.loss.shift.data.fill_(cope_config.init_shift)
             logger.info(f"Set CoPE shift to: {cope_config.init_shift}")
             
         if hasattr(cope_config, 'init_negative_scale'):
-            model.backbone.loss.negative_scale.data.fill_(cope_config.init_negative_scale)
+            model_without_ddp.backbone.loss.negative_scale.data.fill_(cope_config.init_negative_scale)
             logger.info(f"Set CoPE negative_scale to: {cope_config.init_negative_scale}")
     
     # Check for NaN parameters before training
-    check_for_nan_parameters(model, logger, "initial model after config application")
+    check_for_nan_parameters(model_without_ddp, logger, "initial model after config application")
     
     # Check that model returns dictionary features
     logger.info("Verifying model returns dictionary features...")
-    model.eval()
+    model_without_ddp.eval()
     
-    model_params = list(model.parameters())
+    model_params = list(model_without_ddp.parameters())
     ema_params = copy.deepcopy(model_params)
     
     # Check EMA parameters
@@ -304,7 +322,7 @@ def main(config):
     logger.info("✓ EMA parameters initialized successfully")
 
     # Build datasets and dataloaders
-    data_components = build_data(config, preprocess=model.preprocess)
+    data_components = build_data(config, preprocess=model_without_ddp.preprocess)
     train_loader = data_components['train_loader']
     val_loader = data_components['val_loader']
     target_loader = data_components['target_loader']
@@ -320,12 +338,30 @@ def main(config):
     logger.info(f"Available models: {available_models}")
     logger.info(f"Selected model: {config.model.name}")
 
+    if getattr(config, 'distributed', False):
+        find_unused_parameters = getattr(config.training, 'warmup_epochs', 0) > 0
+        if hasattr(config, 'distributed_config'):
+            find_unused_parameters = getattr(
+                config.distributed_config,
+                'find_unused_parameters',
+                find_unused_parameters,
+            )
+        model = DistributedDataParallel(
+            model_without_ddp,
+            device_ids=[config.gpu],
+            output_device=config.gpu,
+            find_unused_parameters=find_unused_parameters,
+        )
+        logger.info(f"DistributedDataParallel enabled with world size {misc.get_world_size()}")
+    else:
+        model = model_without_ddp
+
     # Optimizer - Handle CoPE loss parameters specially
-    if hasattr(model.backbone, 'loss') and model.backbone.loss is not None:
+    if hasattr(model_without_ddp.backbone, 'loss') and model_without_ddp.backbone.loss is not None:
         # Separate CoPE loss parameters from other model parameters
-        cope_params = list(model.backbone.loss.parameters())
+        cope_params = list(model_without_ddp.backbone.loss.parameters())
         cope_param_ids = {id(p) for p in cope_params}
-        other_params = [p for p in model.parameters() if id(p) not in cope_param_ids]
+        other_params = [p for p in model_without_ddp.parameters() if id(p) not in cope_param_ids]
         
         # Use special learning rate for CoPE parameters if specified in config
         cope_lr = getattr(config.optimizer, 'cope_lr', config.optimizer.lr)
@@ -340,7 +376,7 @@ def main(config):
         logger.info(f"Using CoPE loss with special learning rate: {cope_lr}")
         logger.info(f"CoPE parameters: {len(cope_params)} (shift, negative_scale)")
     else:
-        param_groups = [{'params': model.parameters(), 'lr': config.optimizer.lr,
+        param_groups = [{'params': model_without_ddp.parameters(), 'lr': config.optimizer.lr,
                         'betas': (config.optimizer.beta1, config.optimizer.beta2), 'eps': config.optimizer.eps}]
     
     optimizer = AdamW(param_groups)
@@ -349,7 +385,7 @@ def main(config):
     # Warmup configuration
     warmup_epochs = getattr(config.training, 'warmup_epochs', 0)
     if warmup_epochs > 0:
-        if hasattr(model, 'warmup'):
+        if hasattr(model_without_ddp, 'warmup'):
             logger.info(f"Warmup training enabled for {warmup_epochs} epochs")
             logger.info("Will use cross-entropy loss during warmup phase")
         else:
@@ -367,6 +403,8 @@ def main(config):
     
     # Training loop
     for epoch in range(config.training.epochs):
+        if data_components.get('train_sampler') is not None:
+            data_components['train_sampler'].set_epoch(epoch)
 
         train_stats = train_one_epoch(model, model_params, ema_params, train_loader, optimizer, device, epoch, config, logger)
         logger.info(f"Epoch {epoch} loss: {train_stats['loss']}")
@@ -385,26 +423,26 @@ def main(config):
             logger.info(f"Using {eval_mode} evaluation for epoch {epoch}")
             
             # Standard probabilistic evaluation
-            eval_stats = evaluate_probabilistic(model, ema_params, val_loader, target_loader, device, config, logger, use_probabilistic=use_probabilistic_eval)
+            eval_stats = evaluate_probabilistic(model_without_ddp, ema_params, val_loader, target_loader, device, config, logger, use_probabilistic=use_probabilistic_eval)
             logger.info(f"Epoch {epoch} eval: {eval_stats}")
         else:
             logger.info(f"Skipping evaluation for epoch {epoch}")
         
         # Log CoPE loss parameters (only for non-warmup epochs)
-        if epoch >= warmup_epochs and hasattr(model.backbone, 'loss'):
+        if epoch >= warmup_epochs and hasattr(model_without_ddp.backbone, 'loss'):
             logger.info(f"Epoch {epoch} CoPE params - "
-                       f"shift: {model.backbone.loss.shift.item():.4f}, "
-                       f"negative_scale: {model.backbone.loss.negative_scale.item():.4f}")
+                       f"shift: {model_without_ddp.backbone.loss.shift.item():.4f}, "
+                       f"negative_scale: {model_without_ddp.backbone.loss.negative_scale.item():.4f}")
         
         # Checkpoint saving
-        if checkpoint_config:
+        if checkpoint_config and misc.is_main_process():
             should_save, is_best, best_metric_value = should_save_checkpoint(
                 epoch, config, eval_stats, best_metric_value, logger)
             
             if should_save:
                 try:
                     save_checkpoint_hf(
-                        model=model,
+                        model=model_without_ddp,
                         epoch=epoch,
                         eval_stats=eval_stats,
                         config=config,
@@ -426,11 +464,11 @@ def main(config):
                     logger.error(f"Failed to save checkpoint at epoch {epoch}: {e}")
     
     # Save final checkpoint if enabled
-    if checkpoint_config and getattr(checkpoint_config, 'save_last', True):
+    if checkpoint_config and getattr(checkpoint_config, 'save_last', True) and misc.is_main_process():
         try:
             logger.info("Saving final checkpoint...")
             save_checkpoint_hf(
-                model=model,
+                model=model_without_ddp,
                 epoch=config.training.epochs - 1,
                 eval_stats=eval_stats if 'eval_stats' in locals() else {},
                 config=config,
@@ -443,6 +481,8 @@ def main(config):
             logger.error(f"Failed to save final checkpoint: {e}")
     
     logger.info("Training completed!")
+    if misc.is_dist_avail_and_initialized():
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == '__main__':
@@ -461,8 +501,9 @@ if __name__ == '__main__':
     if cli_config:
         config = OmegaConf.merge(config, cli_config)
     
-    print(f"Training probabilistic model with config file: {args.config}")
-    print("Final config:")
-    print(OmegaConf.to_yaml(config))
+    if int(os.environ.get("RANK", "0")) == 0:
+        print(f"Training probabilistic model with config file: {args.config}")
+        print("Final config:")
+        print(OmegaConf.to_yaml(config))
     
     main(config)

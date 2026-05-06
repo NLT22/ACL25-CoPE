@@ -84,7 +84,18 @@ python train.py -c /path/to/your/config.yaml
 
 ## Run training on multiple GPUs
 
-Coming soon.
+Use PyTorch DistributedDataParallel through `torchrun`. The batch size in the
+config is per GPU, so the effective batch size is `batch_size * nproc_per_node`.
+
+```
+torchrun --standalone --nproc_per_node=2 train.py -c /path/to/your/config.yaml
+```
+
+For Kaggle's 2-GPU notebooks, keep `device: cuda:0` in the config and launch
+with `torchrun`; each process will automatically bind to its own local GPU.
+When `training.warmup_epochs > 0`, keep
+`distributed_config.find_unused_parameters: true` because the warmup loss does
+not use every probabilistic loss module.
 
 # Cite
 ```

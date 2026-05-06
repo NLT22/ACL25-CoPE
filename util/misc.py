@@ -206,7 +206,10 @@ def save_on_master(*args, **kwargs):
 
 
 def init_distributed_mode(args):
-    if args.dist_on_itp:
+    if not hasattr(args, 'dist_url'):
+        args.dist_url = 'env://'
+
+    if getattr(args, 'dist_on_itp', False):
         args.rank = int(os.environ['OMPI_COMM_WORLD_RANK'])
         args.world_size = int(os.environ['OMPI_COMM_WORLD_SIZE'])
         args.gpu = int(os.environ['OMPI_COMM_WORLD_LOCAL_RANK'])
@@ -218,7 +221,7 @@ def init_distributed_mode(args):
     elif 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ['WORLD_SIZE'])
-        args.gpu = int(os.environ['LOCAL_RANK'])
+        args.gpu = int(os.environ.get('LOCAL_RANK', 0))
     elif 'SLURM_PROCID' in os.environ:
         args.rank = int(os.environ['SLURM_PROCID'])
         args.gpu = args.rank % torch.cuda.device_count()
@@ -229,6 +232,9 @@ def init_distributed_mode(args):
         return
 
     args.distributed = True
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed training requires CUDA/NCCL in this training script.")
 
     torch.cuda.set_device(args.gpu)
     args.dist_backend = 'nccl'

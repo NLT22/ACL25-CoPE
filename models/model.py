@@ -123,7 +123,11 @@ class ProbCLIP_CIR(nn.Module):
         ref_imgs,
         input_ids,
         tgt_imgs,
+        use_warmup=False,
     ):
+        if use_warmup:
+            return self.warmup(ref_imgs, input_ids, tgt_imgs)
+
         query_features = self.encode_query(ref_imgs, input_ids)
         target_features = self.encode_target(tgt_imgs)
         
