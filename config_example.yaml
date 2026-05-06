@@ -13,6 +13,8 @@ training:
 
 # Validation parameters
 validation:
+  enabled: true
+  frequency: 1  # Run evaluation every N epochs. Set enabled=false to train without validation.
   query_batch_size: 32
   target_batch_size: 32
   shuffle: false
@@ -29,6 +31,10 @@ data:
   data_path: /path/to/data/dir
   dataset: fashioniq # fashioniq | cirr
   category: dress # only required for fashioniq: dress | shirt | toptee 
+  # Optional caps for quick experiments/debugging. 0 or null means no limit.
+  train_max_samples: null
+  val_max_samples: null
+  target_max_samples: null
   augmentation:
     enabled: true
     methods:

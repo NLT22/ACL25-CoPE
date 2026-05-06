@@ -8,6 +8,30 @@ import numpy as np
 from typing import List
 from .transforms import squarepad_transform, targetpad_transform, DataAugmentation
 
+def get_optional_config_value(config_section, name, default=None):
+    if config_section is not None and hasattr(config_section, name):
+        return getattr(config_section, name)
+    return default
+
+
+def apply_sample_limit(items, max_samples=None):
+    if max_samples is None or max_samples == 0:
+        return items
+    if max_samples < 0:
+        raise ValueError(f"max_samples must be non-negative, got {max_samples}")
+    return items[:max_samples]
+
+
+def ordered_unique(items):
+    seen = set()
+    result = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
 def ensure_rgb(img):
     """
     Ensure image is in RGB mode, converting from grayscale if necessary
@@ -50,7 +74,9 @@ class FashionIQDataset(Dataset):
             preprocess: str,
             split: str = 'val', 
             path: str='.',
-            augmenter: DataAugmentation = None
+            augmenter: DataAugmentation = None,
+            max_samples: int = None,
+            target_names: List[str] = None
         ):
         
         super().__init__()
@@ -71,9 +97,14 @@ class FashionIQDataset(Dataset):
 
         if mode == 'query':
             self.metadata = orjson.loads(open(metadata_file).read())
+            self.metadata = apply_sample_limit(self.metadata, max_samples)
             
         if mode == 'target':
             self.names = orjson.loads(open(split_file).read())
+            if target_names is not None:
+                requested_names = set(target_names)
+                self.names = [name for name in self.names if name in requested_names]
+            self.names = apply_sample_limit(self.names, max_samples)
 
 
     def __getitem__(self, index):
@@ -211,7 +242,9 @@ class CIRRDataset(Dataset):
             preprocess, 
             split: str='val', 
             path: str='.',
-            augmenter: DataAugmentation = None
+            augmenter: DataAugmentation = None,
+            max_samples: int = None,
+            target_names: List[str] = None
         ):
         super().__init__()
         assert split in ['train', 'test1', 'val']
@@ -223,6 +256,14 @@ class CIRRDataset(Dataset):
         self.augmenter = augmenter
         self.triplets = orjson.loads(open(os.path.join(path, f'captions/cap.rc2.{self.split}.json')).read())
         self.namepath = orjson.loads(open(os.path.join(path, f'image_splits/split.rc2.{split}.json')).read())
+        self.triplets = apply_sample_limit(self.triplets, max_samples if mode == 'query' else None)
+        if mode == 'target':
+            if target_names is not None:
+                requested_names = set(target_names)
+                self.namepath = {name: path for name, path in self.namepath.items() if name in requested_names}
+            limited_names = apply_sample_limit(list(self.namepath.keys()), max_samples)
+            if max_samples is not None and max_samples != 0:
+                self.namepath = {name: self.namepath[name] for name in limited_names}
 
 
     def __getitem__(self, index):
@@ -305,6 +346,10 @@ def build_data(config, preprocess):
     augmenter = None
     if hasattr(config.data, 'augmentation') and config.data.augmentation.enabled:
         augmenter = DataAugmentation(methods=config.data.augmentation.methods)
+
+    train_max_samples = get_optional_config_value(config.data, 'train_max_samples')
+    val_max_samples = get_optional_config_value(config.data, 'val_max_samples')
+    target_max_samples = get_optional_config_value(config.data, 'target_max_samples')
     
     # Build datasets based on dataset type
     if config.data.dataset == 'fashioniq':
@@ -314,7 +359,8 @@ def build_data(config, preprocess):
             split='train',
             clothtype=config.data.category,
             preprocess=preprocess,
-            augmenter=augmenter
+            augmenter=augmenter,
+            max_samples=train_max_samples
         )
         val_dataset = FashionIQDataset(
             path=config.data.data_path,
@@ -322,13 +368,20 @@ def build_data(config, preprocess):
             split='val',
             clothtype=config.data.category,
             preprocess=preprocess,
+            max_samples=val_max_samples
         )
+        target_names = None
+        if target_max_samples is not None and target_max_samples != 0:
+            target_names = ordered_unique(sample['target'] for sample in val_dataset.metadata)
+            target_names = apply_sample_limit(target_names, target_max_samples)
         target_dataset = FashionIQDataset(
             path=config.data.data_path,
             mode='target',
             split='val',
             clothtype=config.data.category,
             preprocess=preprocess,
+            max_samples=None if target_names is not None else target_max_samples,
+            target_names=target_names
         )
         
         # Use appropriate collate functions for FashionIQ
@@ -341,19 +394,27 @@ def build_data(config, preprocess):
             mode='query',
             split='train',
             preprocess=preprocess,
-            augmenter=augmenter
+            augmenter=augmenter,
+            max_samples=train_max_samples
         )
         val_dataset = CIRRDataset(
             path=config.data.data_path,
             mode='query',
             split='val',
             preprocess=preprocess,
+            max_samples=val_max_samples
         )
+        target_names = None
+        if target_max_samples is not None and target_max_samples != 0:
+            target_names = ordered_unique(sample['target_hard'] for sample in val_dataset.triplets)
+            target_names = apply_sample_limit(target_names, target_max_samples)
         target_dataset = CIRRDataset(
             path=config.data.data_path,
             mode='target',
             split='val',
             preprocess=preprocess,
+            max_samples=None if target_names is not None else target_max_samples,
+            target_names=target_names
         )
         
         # CIRR uses default collate function

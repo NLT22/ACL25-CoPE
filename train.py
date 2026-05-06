@@ -308,6 +308,12 @@ def main(config):
     train_loader = data_components['train_loader']
     val_loader = data_components['val_loader']
     target_loader = data_components['target_loader']
+    logger.info(
+        "Dataset sizes - "
+        f"train: {len(data_components['train_dataset'])}, "
+        f"val queries: {len(data_components['val_dataset'])}, "
+        f"val targets: {len(data_components['target_dataset'])}"
+    )
 
     # Log available models
     available_models = model_registry.list_models()
@@ -365,16 +371,24 @@ def main(config):
         train_stats = train_one_epoch(model, model_params, ema_params, train_loader, optimizer, device, epoch, config, logger)
         logger.info(f"Epoch {epoch} loss: {train_stats['loss']}")
         
-        # Determine evaluation mode based on warmup phase
-        is_warmup = epoch < warmup_epochs
-        use_probabilistic_eval = not is_warmup  # Use deterministic during warmup, probabilistic otherwise
-        
-        eval_mode = "deterministic (cosine similarity)" if is_warmup else "probabilistic (CoPE distance)"
-        logger.info(f"Using {eval_mode} evaluation for epoch {epoch}")
-        
-        # Standard probabilistic evaluation
-        eval_stats = evaluate_probabilistic(model, ema_params, val_loader, target_loader, device, config, logger, use_probabilistic=use_probabilistic_eval)
-        logger.info(f"Epoch {epoch} eval: {eval_stats}")
+        eval_stats = {}
+        validation_enabled = getattr(config.validation, 'enabled', True)
+        eval_frequency = getattr(config.validation, 'frequency', 1)
+        should_run_eval = validation_enabled and eval_frequency > 0 and (epoch + 1) % eval_frequency == 0
+
+        if should_run_eval:
+            # Determine evaluation mode based on warmup phase
+            is_warmup = epoch < warmup_epochs
+            use_probabilistic_eval = not is_warmup  # Use deterministic during warmup, probabilistic otherwise
+            
+            eval_mode = "deterministic (cosine similarity)" if is_warmup else "probabilistic (CoPE distance)"
+            logger.info(f"Using {eval_mode} evaluation for epoch {epoch}")
+            
+            # Standard probabilistic evaluation
+            eval_stats = evaluate_probabilistic(model, ema_params, val_loader, target_loader, device, config, logger, use_probabilistic=use_probabilistic_eval)
+            logger.info(f"Epoch {epoch} eval: {eval_stats}")
+        else:
+            logger.info(f"Skipping evaluation for epoch {epoch}")
         
         # Log CoPE loss parameters (only for non-warmup epochs)
         if epoch >= warmup_epochs and hasattr(model.backbone, 'loss'):

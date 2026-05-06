@@ -170,10 +170,12 @@ def evaluate_probabilistic(model, ema_params, val_loader, tgt_loader, device, co
             # Separate means and vars for efficient batch processing
             all_tgt_means = torch.cat([feat['mean'] for feat in all_tgt_features])
             all_tgt_vars = torch.cat([feat['var'] for feat in all_tgt_features])
+            target_name_to_index = {name: index for index, name in enumerate(all_tgt_names)}
             
             logger.info(f"Collected {len(all_tgt_names)} target features")
             
             count = 0
+            missing_targets = 0
             
             # Process validation batches
             logger.info("Processing validation queries...")
@@ -187,8 +189,27 @@ def evaluate_probabilistic(model, ema_params, val_loader, tgt_loader, device, co
                 query_features = model.encode_query(ref_imgs, input_ids)
                 
                 # Find target indices 
-                tgt_idx = torch.tensor([all_tgt_names.index(name) for name in tgt_img_names], 
-                                     device=query_features['mean'].device)
+                valid_positions = []
+                valid_target_indices = []
+                for batch_index, name in enumerate(tgt_img_names):
+                    target_index = target_name_to_index.get(name)
+                    if target_index is None:
+                        missing_targets += 1
+                    else:
+                        valid_positions.append(batch_index)
+                        valid_target_indices.append(target_index)
+
+                if not valid_positions:
+                    continue
+
+                if len(valid_positions) != len(tgt_img_names):
+                    valid_positions_tensor = torch.tensor(valid_positions, device=query_features['mean'].device)
+                    query_features = {
+                        key: value.index_select(0, valid_positions_tensor)
+                        for key, value in query_features.items()
+                    }
+
+                tgt_idx = torch.tensor(valid_target_indices, device=query_features['mean'].device)
 
                 if use_probabilistic:
                     # Compute probabilistic distances
@@ -213,11 +234,20 @@ def evaluate_probabilistic(model, ema_params, val_loader, tgt_loader, device, co
                 for metric in metrics:
                     recall_metrics[metric] += torch.sum(labels[:, :metric]).item()
 
-                count += len(ref_imgs)
+                count += len(valid_positions)
 
     # Restore original model state
     if use_ema:
         model.load_state_dict(model_state_dict)
+
+    if missing_targets and logger:
+        logger.warning(
+            f"Skipped {missing_targets} validation queries because their targets were not in the target gallery. "
+            "Increase data.target_max_samples or leave it unset for full-gallery evaluation."
+        )
+
+    if count == 0:
+        raise ValueError("No validation queries could be evaluated because no target labels were present in the target gallery.")
 
     # Compute final recall percentages
     for metric in metrics:
