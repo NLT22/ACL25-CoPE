@@ -1,11 +1,22 @@
 import os
 from torch.utils.data import Dataset
-import orjson
+try:
+    import orjson
+except ImportError:
+    import json
+
+    class _OrjsonFallback:
+        @staticmethod
+        def loads(value):
+            return json.loads(value)
+
+    orjson = _OrjsonFallback()
 from PIL import Image
 import random
 from torch.utils.data import default_collate
 import numpy as np
 from typing import List
+from collections import defaultdict
 from .transforms import squarepad_transform, targetpad_transform, DataAugmentation
 
 def ensure_rgb(img):
@@ -289,6 +300,91 @@ class CIRRDataset(Dataset):
             return len(self.triplets)
 
 
+class ITCPRCrossDomainDataset(Dataset):
+    """Source-filtered ITCPR triplets for cross-domain training and evaluation."""
+
+    SOURCES = ('Celeb-reID', 'LAST', 'PRCC')
+
+    def __init__(
+            self,
+            path,
+            mode,
+            source,
+            preprocess,
+            split='val',
+            augmenter=None,
+        ):
+        super().__init__()
+        assert mode in ('query', 'target')
+        assert split in ('train', 'val')
+        if source not in self.SOURCES:
+            raise ValueError(f"source must be one of {self.SOURCES}, got {source}")
+
+        self.path = path
+        self.mode = mode
+        self.source = source
+        self.preprocess = preprocess
+        self.split = split
+        self.augmenter = augmenter
+
+        with open(os.path.join(path, 'query.json')) as f:
+            queries = orjson.loads(f.read())
+        with open(os.path.join(path, 'gallery.json')) as f:
+            gallery = orjson.loads(f.read())
+
+        self.queries = [row for row in queries if row['datasets'] == source]
+        self.gallery = [row for row in gallery if row['datasets'] == source]
+
+        positives_by_iid = defaultdict(list)
+        for row in self.gallery:
+            iid = int(row['instance_id'])
+            if iid != -1:
+                positives_by_iid[iid].append(row)
+        self.positives_by_iid = positives_by_iid
+
+        missing = [
+            int(row['instance_id']) for row in self.queries
+            if int(row['instance_id']) not in positives_by_iid
+        ]
+        if missing:
+            raise ValueError(
+                f"{source} contains {len(missing)} queries without a positive gallery target"
+            )
+
+    def _load_image(self, relative_path, augment=False):
+        image = ensure_rgb(Image.open(os.path.join(self.path, relative_path)))
+        if augment and self.augmenter:
+            image = self.augmenter.apply(image)
+        return self.preprocess(image)
+
+    def __getitem__(self, index):
+        if self.mode == 'target':
+            row = self.gallery[index]
+            return {
+                'img_name': row['file_path'],
+                'img': self._load_image(row['file_path']),
+            }
+
+        row = self.queries[index]
+        positive = self.positives_by_iid[int(row['instance_id'])][0]
+        result = {
+            'ref_img_name': row['file_path'],
+            'ref_img': self._load_image(
+                row['file_path'], augment=self.split == 'train'
+            ),
+            'text_instruction': row['caption'],
+            'tgt_img_name': positive['file_path'],
+        }
+        if self.split == 'train':
+            result['tgt_img'] = self._load_image(
+                positive['file_path'], augment=True
+            )
+        return result
+
+    def __len__(self):
+        return len(self.gallery) if self.mode == 'target' else len(self.queries)
+
+
 def build_data(config, preprocess):
     """
     Build datasets and dataloaders based on configuration
@@ -357,6 +453,34 @@ def build_data(config, preprocess):
         )
         
         # CIRR uses default collate function
+        train_collate_fn = None
+        val_collate_fn = None
+
+    elif config.data.dataset == 'itcpr_cross_domain':
+        train_source = getattr(config.data, 'train_source', 'Celeb-reID')
+        eval_source = getattr(config.data, 'eval_source', 'LAST')
+        train_dataset = ITCPRCrossDomainDataset(
+            path=config.data.data_path,
+            mode='query',
+            source=train_source,
+            split='train',
+            preprocess=preprocess,
+            augmenter=augmenter,
+        )
+        val_dataset = ITCPRCrossDomainDataset(
+            path=config.data.data_path,
+            mode='query',
+            source=eval_source,
+            split='val',
+            preprocess=preprocess,
+        )
+        target_dataset = ITCPRCrossDomainDataset(
+            path=config.data.data_path,
+            mode='target',
+            source=eval_source,
+            split='val',
+            preprocess=preprocess,
+        )
         train_collate_fn = None
         val_collate_fn = None
         

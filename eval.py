@@ -91,10 +91,12 @@ def print_results(eval_stats, logger=None):
     # Print recall metrics
     logger.info("Recall Metrics:")
     for metric, value in eval_stats.items():
-        if metric.startswith('r_') or 'recall' in metric.lower():
-            logger.info(f"  {metric}: {value:.2f}%")
+        metric_name = f"R@{metric}" if isinstance(metric, int) else str(metric)
+        metric_lower = metric_name.lower()
+        if isinstance(metric, int) or metric_lower.startswith('r_') or 'recall' in metric_lower:
+            logger.info(f"  {metric_name}: {value:.2f}%")
         else:
-            logger.info(f"  {metric}: {value:.4f}")
+            logger.info(f"  {metric_name}: {value:.4f}")
     
     
     logger.info("=" * 60)
@@ -130,7 +132,7 @@ def main():
     parser.add_argument('--device', type=str, default=None,
                         help='Device to use (overrides config)')
     
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
     
     # Setup logging
     logger = setup_logging()
@@ -138,6 +140,9 @@ def main():
     # Load configuration
     logger.info(f"Loading configuration from: {args.config}")
     config = OmegaConf.load(args.config)
+    cli_config = OmegaConf.from_cli(unknown)
+    if cli_config:
+        config = OmegaConf.merge(config, cli_config)
     
     # Override device if specified
     if args.device:
@@ -148,7 +153,20 @@ def main():
     
     # Load model
     logger.info(f"Loading model: {config.model.name}")
-    model = model_registry.get_model(config.model.name, config.model.path).to(device)
+    neighborhood_config = getattr(config.model, 'neighborhood_loss', {})
+    loss_weights_config = getattr(config.model, 'loss_weights', {})
+    preprocessing_config = getattr(config.model, 'preprocessing', {})
+    model = model_registry.get_model(
+        config.model.name,
+        config.model.path,
+        neighborhood_loss_weight=getattr(neighborhood_config, 'weight', 0.01),
+        k_neighbors=getattr(neighborhood_config, 'k_neighbors', 5),
+        alpha=getattr(loss_weights_config, 'alpha', 0.9),
+        beta=getattr(loss_weights_config, 'beta', 0.1),
+        target_ratio=getattr(preprocessing_config, 'target_ratio', 1.25),
+        image_size=getattr(preprocessing_config, 'image_size', 224),
+        local_files_only=getattr(config.model, 'local_files_only', True),
+    ).to(device)
     
     # Check if it's a probabilistic model
     is_probabilistic = hasattr(model.backbone, 'loss') or 'prob' in config.model.name.lower()
@@ -214,4 +232,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

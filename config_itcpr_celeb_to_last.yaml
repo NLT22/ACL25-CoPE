@@ -1,0 +1,75 @@
+training:
+  batch_size: 6
+  epochs: 100
+  warmup_epochs: 1
+  shuffle: true
+  num_workers: 8
+  pin_memory: true
+  drop_last: true
+
+validation:
+  query_batch_size: 16
+  target_batch_size: 16
+  shuffle: false
+  num_workers: 8
+  pin_memory: true
+  metrics: 
+    - 1
+    - 5
+    - 10
+
+data:
+  data_path: ../Composed_Person_Retrieval/data
+  dataset: itcpr_cross_domain
+  train_source: Celeb-reID
+  eval_source: LAST
+  augmentation:
+    enabled: true
+    methods:
+      - cutout
+      - modify_hsv
+      - rotate
+      - scale
+      - noise
+
+output:
+  checkpoint:
+    save_dir: checkpoints/itcpr_celeb_to_last_100epoch
+    save_frequency: 1
+    save_best_only: false
+    best_metric: 1
+    best_metric_mode: max
+    save_last: true
+    max_checkpoints: 3
+
+device: cuda:0
+
+model:
+  name: prob_clip
+  path: openai/clip-vit-large-patch14
+  local_files_only: false
+  neighborhood_loss:
+    weight: 0.02
+    k_neighbors: 5
+  loss_weights:
+    alpha: 0.9
+    beta: 0.1
+  cope_loss:
+    init_shift: 5
+    init_negative_scale: 5
+  preprocessing:
+    target_ratio: 1.25
+    image_size: 224
+  uncertainty:
+    sigma_ln_init: 0.01
+    sigma_ln_init_bias: 0
+
+optimizer:
+  lr: 2.0e-6
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-7
+  cope_lr: 2.0e-7
+
+ema:
+  rate: 0.99
